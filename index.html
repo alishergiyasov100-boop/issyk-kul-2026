@@ -218,15 +218,15 @@ function leavesSVG(c){return '<svg xmlns="http://www.w3.org/2000/svg" width="70"
 function diamondSVG(c){return '<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60" viewBox="0 0 60 60"><path d="M30 5 L55 30 L30 55 L5 30 Z M30 15 L45 30 L30 45 L15 30 Z" fill="none" stroke="'+c+'" stroke-width="1.3"/></svg>';}
 
 const STATE_PATH = '_state.json';
-const REL_TAG = 'media';
+const MEDIA_DIR = 'media';
 
 let cfg = JSON.parse(localStorage.getItem('issyk_cfg') || 'null');
 let state = { cats: [] };
 let stateSha = null;
-let releaseId = null;
 
 function ghHeaders() { return { 'Authorization': 'Bearer ' + cfg.token, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }; }
 function apiBase() { return 'https://api.github.com/repos/' + cfg.repo; }
+function rawBase() { return 'https://raw.githubusercontent.com/' + cfg.repo + '/main/'; }
 
 async function ghGet(path) {
   const r = await fetch(apiBase() + '/contents/' + path + '?ref=main', { headers: ghHeaders() });
@@ -244,19 +244,12 @@ async function ghPut(path, contentBase64, sha, msg) {
   if (!r.ok) throw new Error('PUT '+path+' '+r.status);
   return await r.json();
 }
-
-async function ensureRelease() {
-  if (releaseId) return releaseId;
-  let r = await fetch(apiBase() + '/releases/tags/' + REL_TAG, { headers: ghHeaders() });
-  if (r.ok) { const j = await r.json(); releaseId = j.id; return j.id; }
-  r = await fetch(apiBase() + '/releases', {
-    method:'POST', headers: { ...ghHeaders(), 'Content-Type':'application/json' },
-    body: JSON.stringify({ tag_name: REL_TAG, name: 'Media storage', body: 'Auto: фото и видео альбома.', draft: false, prerelease: false }),
+async function ghDelete(path, sha) {
+  const r = await fetch(apiBase() + '/contents/' + path, {
+    method:'DELETE', headers: { ...ghHeaders(), 'Content-Type':'application/json' },
+    body: JSON.stringify({ message: 'rm '+path, sha, branch:'main' }),
   });
-  if (!r.ok) throw new Error('create release ' + r.status);
-  const j = await r.json();
-  releaseId = j.id;
-  return j.id;
+  if (!r.ok && r.status !== 404) throw new Error('DEL '+path+' '+r.status);
 }
 
 async function loadState() {
@@ -270,7 +263,6 @@ async function loadState() {
       state = { cats: [{ id: rand(), name: 'Пляж', theme: 'beach', items: [] }] };
       await saveState();
     }
-    await ensureRelease();
   } catch(e) { console.error(e); toast('Ошибка загрузки: '+e.message); }
 }
 async function saveState() {
@@ -299,34 +291,28 @@ async function saveState() {
 function rand() { return Math.random().toString(36).slice(2,11); }
 
 async function uploadFile(file) {
-  const relId = await ensureRelease();
-  const ext = ((file.name||'').split('.').pop() || 'bin').toLowerCase();
+  const buf = await file.arrayBuffer();
+  let binary = '';
+  const bytes = new Uint8Array(buf);
+  const chunk = 0x8000;
+  for (let i=0; i<bytes.length; i+=chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i+chunk));
+  }
+  const b64 = btoa(binary);
+  const ext = ((file.name||'').split('.').pop() || 'jpg').toLowerCase();
   const key = Date.now() + '_' + rand() + '.' + ext;
-  const url = 'https://uploads.github.com/repos/' + cfg.repo + '/releases/' + relId + '/assets?name=' + encodeURIComponent(key);
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { ...ghHeaders(), 'Content-Type': file.type || 'application/octet-stream' },
-    body: file,
-  });
-  if (!r.ok) throw new Error('upload ' + r.status);
+  const path = MEDIA_DIR + '/' + key;
+  await ghPut(path, b64, null, 'add '+key);
   return { key, type: file.type };
 }
 async function deleteFile(key) {
+  const path = MEDIA_DIR + '/' + key;
   try {
-    await ensureRelease();
-    // fetch release fresh, найти asset id
-    const r = await fetch(apiBase() + '/releases/' + releaseId, { headers: ghHeaders() });
-    if (!r.ok) return;
-    const j = await r.json();
-    const a = (j.assets || []).find(x => x.name === key);
-    if (a) {
-      await fetch(apiBase() + '/releases/assets/' + a.id, { method:'DELETE', headers: ghHeaders() });
-    }
+    const j = await ghGet(path);
+    if (j) await ghDelete(path, j.sha);
   } catch(e) { console.error(e); }
 }
-function mediaUrl(key) {
-  return 'https://github.com/' + cfg.repo + '/releases/download/' + REL_TAG + '/' + encodeURIComponent(key);
-}
+function mediaUrl(key) { return rawBase() + MEDIA_DIR + '/' + key; }
 
 const setup = document.getElementById('setup');
 const app = document.getElementById('app');
