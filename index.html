@@ -153,25 +153,19 @@
 </head>
 <body>
 
-<!-- SETUP SCREEN (показывается если нет токена) -->
+<!-- SETUP SCREEN (показывается если нет конфига) -->
 <div id="setup" class="setup" style="display:none;">
   <div class="eyebrow">Первый запуск</div>
-  <h2>Подключи свой GitHub</h2>
-  <p>Альбом хранит фото в твоём GitHub-репо. Нужен fine-grained PAT (живёт у тебя в браузере, никуда не уходит).</p>
-  <ol>
-    <li>Зайди на <a href="https://github.com/settings/personal-access-tokens/new" target="_blank">github.com/settings/personal-access-tokens/new</a></li>
-    <li><b>Resource owner:</b> твой акк.</li>
-    <li><b>Repository access:</b> Only select repositories → выбери репо альбома.</li>
-    <li><b>Permissions → Repository → Contents:</b> Read and write.</li>
-    <li>Generate token, скопируй (`github_pat_...`).</li>
-  </ol>
+  <h2>Подключи Cloudflare R2</h2>
+  <p>Фото лежат в твоём R2-ведре, сайт ходит к ним через Worker. Настрой один раз, потом забудь.</p>
+  <p>Если ещё не делал — открой <a href="https://github.com/alishergiyasov100-boop/issyk-kul-2026/blob/main/SETUP.md" target="_blank">SETUP.md</a>, там пошаговая инструкция.</p>
   <div class="field">
-    <label>Owner / Repo</label>
-    <input id="setupRepo" placeholder="USERNAME/issyk-kul-2026" autocomplete="off">
+    <label>Worker URL</label>
+    <input id="setupWorker" placeholder="https://issyk-kul.твоё-имя.workers.dev" autocomplete="off">
   </div>
   <div class="field">
-    <label>GitHub PAT</label>
-    <input id="setupToken" type="password" placeholder="github_pat_..." autocomplete="off">
+    <label>Secret</label>
+    <input id="setupSecret" type="password" placeholder="тот же что в env SECRET" autocomplete="off">
   </div>
   <button id="setupSave">Подключить</button>
 </div>
@@ -223,49 +217,18 @@ function sunSVG(c){return '<svg xmlns="http://www.w3.org/2000/svg" width="120" h
 function leavesSVG(c){return '<svg xmlns="http://www.w3.org/2000/svg" width="70" height="70" viewBox="0 0 70 70"><path d="M20 50 Q20 20 35 20 Q50 20 50 50 Q35 60 20 50 Z M35 20 L35 60" fill="none" stroke="'+c+'" stroke-width="1.3"/></svg>';}
 function diamondSVG(c){return '<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60" viewBox="0 0 60 60"><path d="M30 5 L55 30 L30 55 L5 30 Z M30 15 L45 30 L30 45 L15 30 Z" fill="none" stroke="'+c+'" stroke-width="1.3"/></svg>';}
 
-const STATE_PATH = '_state.json';
-const PHOTOS_DIR = 'photos';
-
 let cfg = JSON.parse(localStorage.getItem('issyk_cfg') || 'null');
 let state = { cats: [] };
-let stateSha = null;
 
-function ghHeaders() { return { 'Authorization': 'Bearer ' + cfg.token, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }; }
-function apiBase() { return 'https://api.github.com/repos/' + cfg.repo; }
-function rawBase() { return 'https://raw.githubusercontent.com/' + cfg.repo + '/main/'; }
-
-async function ghGet(path) {
-  const r = await fetch(apiBase() + '/contents/' + path + '?ref=main', { headers: ghHeaders() });
-  if (r.status === 404) return null;
-  if (!r.ok) throw new Error('GET '+path+' '+r.status);
-  return await r.json();
-}
-async function ghPut(path, contentBase64, sha, msg) {
-  const body = { message: msg || ('upd '+path), content: contentBase64, branch: 'main' };
-  if (sha) body.sha = sha;
-  const r = await fetch(apiBase() + '/contents/' + path, {
-    method:'PUT', headers: { ...ghHeaders(), 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error('PUT '+path+' '+r.status+': '+await r.text());
-  return await r.json();
-}
-async function ghDelete(path, sha) {
-  const r = await fetch(apiBase() + '/contents/' + path, {
-    method:'DELETE', headers: { ...ghHeaders(), 'Content-Type':'application/json' },
-    body: JSON.stringify({ message: 'rm '+path, sha, branch:'main' }),
-  });
-  if (!r.ok && r.status !== 404) throw new Error('DEL '+path+' '+r.status);
-}
+function workerBase() { return cfg.worker.replace(/\/+$/, ''); }
+function authHeaders() { return { 'X-Auth': cfg.secret }; }
 
 async function loadState() {
   try {
-    const j = await ghGet(STATE_PATH);
-    if (j) {
-      stateSha = j.sha;
-      const dec = atob(j.content.replace(/\n/g,''));
-      state = JSON.parse(new TextDecoder().decode(Uint8Array.from(dec, c => c.charCodeAt(0))));
-    } else {
+    const r = await fetch(workerBase() + '/api/state', { headers: authHeaders() });
+    if (!r.ok) throw new Error('state ' + r.status);
+    state = await r.json();
+    if (!state.cats || state.cats.length === 0) {
       state = { cats: [{ id: rand(), name: 'Пляж', theme: 'beach', items: [] }] };
       await saveState();
     }
@@ -273,53 +236,32 @@ async function loadState() {
 }
 async function saveState() {
   try {
-    const json = JSON.stringify(state, null, 2);
-    const b64 = btoa(unescape(encodeURIComponent(json)));
-    const res = await ghPut(STATE_PATH, b64, stateSha, 'state update');
-    stateSha = res.content.sha;
-  } catch(e) {
-    if (String(e).includes('409')) {
-      // sha conflict — reload + retry once
-      try {
-        const j = await ghGet(STATE_PATH);
-        if (j) {
-          stateSha = j.sha;
-          const json = JSON.stringify(state, null, 2);
-          const b64 = btoa(unescape(encodeURIComponent(json)));
-          const res = await ghPut(STATE_PATH, b64, stateSha, 'state retry');
-          stateSha = res.content.sha;
-          return;
-        }
-      } catch(_) {}
-    }
-    toast('Не сохранить state: '+e.message);
-  }
+    await fetch(workerBase() + '/api/state', {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(state),
+    });
+  } catch(e) { toast('Не сохранить state: '+e.message); }
 }
 function rand() { return Math.random().toString(36).slice(2,11); }
 
 async function uploadFile(file) {
-  const buf = await file.arrayBuffer();
-  // base64 of binary, chunked (atob/btoa чтоб не упасть на больших)
-  let binary = '';
-  const bytes = new Uint8Array(buf);
-  const chunk = 0x8000;
-  for (let i=0; i<bytes.length; i+=chunk) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i+chunk));
-  }
-  const b64 = btoa(binary);
-  const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
-  const key = Date.now() + '_' + rand() + '.' + ext;
-  const path = PHOTOS_DIR + '/' + key;
-  await ghPut(path, b64, null, 'add '+key);
-  return { key, type: file.type };
+  const fd = new FormData(); fd.append('file', file);
+  const r = await fetch(workerBase() + '/api/upload', {
+    method: 'POST', headers: authHeaders(), body: fd,
+  });
+  if (!r.ok) throw new Error('upload ' + r.status);
+  const { key, type } = await r.json();
+  return { key, type };
 }
 async function deleteFile(key) {
-  const path = PHOTOS_DIR + '/' + key;
   try {
-    const j = await ghGet(path);
-    if (j) await ghDelete(path, j.sha);
+    await fetch(workerBase() + '/' + key, {
+      method: 'DELETE', headers: authHeaders(),
+    });
   } catch(e) { console.error(e); }
 }
+function mediaUrl(key) { return workerBase() + '/' + key; }
 
 const setup = document.getElementById('setup');
 const app = document.getElementById('app');
@@ -390,7 +332,7 @@ function render() {
 function makeTile(it, ci, idx) {
   const tile = document.createElement('div');
   tile.className = 'tile' + (idx % 5 === 2 ? ' tall' : '');
-  const src = rawBase() + PHOTOS_DIR + '/' + it.key;
+  const src = mediaUrl(it.key);
   if (it.type && it.type.startsWith('video/')) {
     const v = document.createElement('video');
     v.src = src; v.muted = true; v.playsInline = true; v.loop = true; v.preload = 'metadata';
@@ -425,7 +367,7 @@ const lb = document.getElementById('lb');
 const lbcontent = document.getElementById('lbcontent');
 function openLightbox(it) {
   lbcontent.innerHTML = '';
-  const src = rawBase() + PHOTOS_DIR + '/' + it.key;
+  const src = mediaUrl(it.key);
   if (it.type && it.type.startsWith('video/')) {
     const v = document.createElement('video'); v.src = src; v.controls = true; v.autoplay = true; v.playsInline = true;
     lbcontent.appendChild(v);
@@ -506,10 +448,10 @@ document.getElementById('sheetOk').addEventListener('click', async () => {
 sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.classList.remove('open'); });
 
 document.getElementById('setupSave').addEventListener('click', () => {
-  const repo = document.getElementById('setupRepo').value.trim();
-  const token = document.getElementById('setupToken').value.trim();
-  if (!repo || !token) { alert('Заполни оба поля'); return; }
-  cfg = { repo, token };
+  const worker = document.getElementById('setupWorker').value.trim();
+  const secret = document.getElementById('setupSecret').value.trim();
+  if (!worker || !secret) { alert('Заполни оба поля'); return; }
+  cfg = { worker, secret };
   localStorage.setItem('issyk_cfg', JSON.stringify(cfg));
   location.reload();
 });
