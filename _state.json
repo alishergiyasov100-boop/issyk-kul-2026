@@ -4,7 +4,13 @@
       "id": "4r9pf6egx",
       "name": "Пляж",
       "theme": "beach",
-      "items": []
+      "items": [
+        {
+          "key": "1781168364342_1zu9bg87j.jpg",
+          "type": "image/jpeg",
+          "addedAt": 1781168366186
+        }
+      ]
     }
   ]
 }
